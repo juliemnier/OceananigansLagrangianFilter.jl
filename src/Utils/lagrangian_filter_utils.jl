@@ -573,7 +573,7 @@ struct DiscreteRelaxation{SRC, TGT, M} <: Function
     mask_func::M
 end
 
-@inline relax_field(fields, ::Val{name}) where name = @inbounds getproperty(fields, name)
+@inline @generated relax_field(fields, ::Val{name}) where name = :(@inbounds fields.$name)
 
 @inline function (f::DiscreteRelaxation{SRC, TGT})(i, j, k, grid, clock, model_fields, p) where {SRC, TGT}
     src = @inbounds relax_field(model_fields, Val(SRC))[i, j, k]
