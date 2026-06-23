@@ -390,6 +390,14 @@ function create_original_vars(config::AbstractConfig)
         fts_data = FieldTimeSeries(original_data_filename, var_name, architecture=architecture,backend=backend)[1]
         vars[Symbol(var_name)] = fts_data
     end
+
+    # mask is supplied as static auxiliary Field (GPU-safe continuous forcing) 
+    if config.boundary_relaxation && config.discrete_relaxation
+        mask_field = CenterField(grid)
+        set!(mask_field, config.mask_params.mask_topo)
+        vars[relaxation_mask_name(config.label)] = mask_field
+    end
+
     return NamedTuple(vars)
 end
 
@@ -565,28 +573,16 @@ function _make_xiS_forcing(i::Int, vel_name::String, filter_params::NamedTuple)
 end
 
 
-# struct and function for discrete relaxation
-# Discrete-form relaxation: -invτ * (target - source*coef) * mask, masked by mask_func(i,j,k,grid,p).
-struct DiscreteRelaxation{SRC, TGT, M} <: Function
-    coef::Float64
-    invτ::Float64
-    mask_func::M
-end
+relaxation_mask_name(label) = Symbol("mask_relaxation" * label)
 
-@inline @generated function relax_field(fields, ::Val{name}) where name
-    idx = findfirst(isequal(name), fieldnames(fields))
-    return :(@inbounds getfield(fields, $idx))
-end
-
-@inline function (f::DiscreteRelaxation{SRC, TGT})(i, j, k, grid, clock, model_fields, p) where {SRC, TGT}
-    src = @inbounds relax_field(model_fields, Val(SRC))[i, j, k]
-    tgt = @inbounds relax_field(model_fields, Val(TGT))[i, j, k]
-    m   = f.mask_func(i, j, k, grid, p)
-    return -f.invτ * (tgt - src * f.coef) * m
+# Discrete-form relaxation  built as a continuous forcing 
+function _make_relaxation_forcing(src_key::Symbol, tgt_key::Symbol, coef::Real, invτ::Real, mask_name::Symbol)
+    relax_func = (args...) -> -args[end][2] * (args[end-2] - args[end-3] * args[end][1]) * args[end-1]
+    return Forcing(relax_func; field_dependencies = (src_key, tgt_key, mask_name), parameters = (coef, invτ))
 end
 
 # Functions for relaxation. 
-function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Function, mask_params::Union{NamedTuple, Nothing}, discrete::Bool=false) 
+function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     gCkey = Symbol(labelled_var_name,"_C",i)
     var_key = Symbol(original_var_name)
     if discrete
@@ -594,8 +590,7 @@ function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_nam
         c = getproperty(filter_params, Symbol("c", i))
         coef = filter_params.N_coeffs == 0.5 ? 1/c :
                (d = getproperty(filter_params, Symbol("d", i)); c / (c^2 + d^2))
-        func = DiscreteRelaxation{var_key, gCkey, typeof(mask_func)}(coef, invτ, mask_func)
-        return Forcing(func; discrete_form = true, parameters = mask_params)
+        return _make_relaxation_forcing(var_key, gCkey, coef, invτ, mask_name)
     else
         if filter_params.N_coeffs == 0.5 # Single exponential special case has a simpler forcing
             c = getproperty(filter_params, Symbol("c",i))
@@ -617,7 +612,7 @@ function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_nam
 end
 
 # Functions for relaxation. 
-function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Function, mask_params::Union{NamedTuple, Nothing}, discrete::Bool=false)
+function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     c = getproperty(filter_params, Symbol("c",i))
     d = getproperty(filter_params, Symbol("d",i))
     gSkey = Symbol(labelled_var_name, "_S",i)
@@ -625,8 +620,7 @@ function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_nam
     if discrete
         invτ = 1 / relax_timescale
         coef = d / (c^2 + d^2)
-        func = DiscreteRelaxation{var_key, gSkey, typeof(mask_func)}(coef, invτ, mask_func)
-        return Forcing(func; discrete_form = true, parameters = mask_params)
+        return _make_relaxation_forcing(var_key, gSkey, coef, invτ, mask_name)
     else
         # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, d, relax_timescale, mask_params), and field deps are original variable (args[end-2]), gS (args[end-1])
         # use this general call signature to account for different numbers of spatial variables
@@ -637,7 +631,7 @@ function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_nam
 end
 
 # Functions for relaxation. 
-function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Function, mask_params::Union{NamedTuple, Nothing}, discrete::Bool=false)
+function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     xiCkey = Symbol(labelled_var_name,"_C",i)
     vel_key = Symbol(vel_name)
     if discrete
@@ -645,9 +639,8 @@ function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
         c = getproperty(filter_params, Symbol("c", i))
         coef = filter_params.N_coeffs == 0.5 ? -1/c^2 :
                (d = getproperty(filter_params, Symbol("d", i)); (d^2 - c^2) / (c^2 + d^2)^2)
-        func = DiscreteRelaxation{vel_key, xiCkey, typeof(mask_func)}(coef, invτ, mask_func)
-        return Forcing(func; discrete_form = true, parameters = mask_params)
-    else 
+        return _make_relaxation_forcing(vel_key, xiCkey, coef, invτ, mask_name)
+    else
         if filter_params.N_coeffs == 0.5 # Single exponential special case has a simpler forcing
             c = getproperty(filter_params, Symbol("c",i))    
             # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, relax_timescale, mask_params), and field deps are vel (args[end-2]), xiC (args[end-1])
@@ -670,7 +663,7 @@ function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
 end
 
 # Functions for relaxation. 
-function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Function, mask_params::Union{NamedTuple, Nothing}, discrete::Bool=false)
+function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     c = getproperty(filter_params, Symbol("c",i))
     d = getproperty(filter_params, Symbol("d",i))
     xiSkey = Symbol(labelled_var_name, "_S",i)
@@ -678,8 +671,7 @@ function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
     if discrete
         invτ = 1 / relax_timescale
         coef = (-2 * c * d) / (c^2 + d^2)^2
-        func = DiscreteRelaxation{vel_key, xiSkey, typeof(mask_func)}(coef, invτ, mask_func)
-        return Forcing(func; discrete_form = true, parameters = mask_params)
+        return _make_relaxation_forcing(vel_key, xiSkey, coef, invτ, mask_name)
     else
         # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, d, relax_timescale, mask_params), and field deps are velocity (args[end-2]), xiS (args[end-1])
         # use this general call signature to account for different numbers of spatial variables
@@ -729,6 +721,7 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
     N_coeffs = filter_params.N_coeffs
     label = config.label
     discrete = config.discrete_relaxation
+    mask_name = relaxation_mask_name(label)
     # Initialize dictionary
     gC_forcings_dict = Dict()
 
@@ -751,7 +744,7 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
                 relax_timescale = config.relax_timescale
                 mask_func = config.mask_func
                 mask_params = config.mask_params
-                gC_relaxation = _make_gC_relaxation(1, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
+                gC_relaxation = _make_gC_relaxation(1, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
                 gC_forcings_dict[gCkey] = (gC_forcing, gC_original_var_forcing, gC_relaxation)
             else
                 gC_forcings_dict[gCkey] = (gC_forcing, gC_original_var_forcing)
@@ -775,7 +768,7 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
                     relax_timescale = config.relax_timescale
                     mask_func = config.mask_func
                     mask_params = config.mask_params
-                    xiC_relaxation = _make_xiC_relaxation(1, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
+                    xiC_relaxation = _make_xiC_relaxation(1, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
                     gC_forcings_dict[gCkey] = (xiC_forcing, gC_forcing, xiC_relaxation)
                 else
                     gC_forcings_dict[gCkey] = (xiC_forcing, gC_forcing)
@@ -804,8 +797,8 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
                     relax_timescale = config.relax_timescale
                     mask_func = config.mask_func
                     mask_params = config.mask_params
-                    gC_relaxation = _make_gC_relaxation(i, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
-                    gS_relaxation = _make_gS_relaxation(i, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
+                    gC_relaxation = _make_gC_relaxation(i, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
+                    gS_relaxation = _make_gS_relaxation(i, labelled_var_name, var_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
 
                     gC_forcings_dict[gCkey] = (gC_forcing_i, gC_original_var_forcing, gC_relaxation)
                     gS_forcings_dict[gSkey] = (gS_forcing_i, gS_relaxation)
@@ -840,8 +833,8 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
                         relax_timescale = config.relax_timescale
                         mask_func = config.mask_func
                         mask_params = config.mask_params
-                        xiC_relaxation = _make_xiC_relaxation(i, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
-                        xiS_relaxation = _make_xiS_relaxation(i, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, discrete)
+                        xiC_relaxation = _make_xiC_relaxation(i, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
+                        xiS_relaxation = _make_xiS_relaxation(i, labelled_var_name, vel_name, filter_params, relax_timescale, mask_func, mask_params, mask_name, discrete)
                         gC_forcings_dict[gCkey] = (xiC_forcing_i, gC_forcing_i, xiC_relaxation)
                         gS_forcings_dict[gSkey] = (xiS_forcing_i, gS_forcing_i, xiS_relaxation)
                     else
