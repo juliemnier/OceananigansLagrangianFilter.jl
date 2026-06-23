@@ -567,7 +567,7 @@ end
 
 # struct and function for discrete relaxation
 # Discrete-form relaxation: -invτ * (target - source*coef) * mask, masked by mask_func(i,j,k,grid,p).
-struct DiscreteRelaxation{SRC, TGT, M}
+struct DiscreteRelaxation{SRC, TGT, M} <: Function
     coef::Float64
     invτ::Float64
     mask_func::M
