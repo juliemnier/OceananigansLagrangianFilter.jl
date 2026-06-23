@@ -109,6 +109,7 @@ struct OfflineFilterConfig <: AbstractOfflineConfig
     relax_timescale::Union{Real, Nothing}
     mask_params::Union{NamedTuple, Nothing}
     mask_func::Union{Function, Nothing}
+    discrete_relaxation::Bool
 
 end
 
@@ -143,6 +144,7 @@ end
                         relax_timescale::Union{Real, Nothing} = nothing,
                         mask_params::Union{NamedTuple, Nothing} = nothing,
                         mask_func::Union{Function, Nothing} = nothing)
+                        discrete_relaxation::Bool = false,
 
 Constructs a configuration object for offline Lagrangian filtering of Oceananigans data.
 This function validates the input data file, time specifications, and filter parameters
@@ -182,6 +184,7 @@ Keyword arguments
   - `relax_timescale`: A `Real` indicating the timescale at which to relax the boundaries to the original fields if boundary_relaxation is `true`. Default `nothing`.
   - `mask_params`: A `NamedTuple` containing any parameters necessary for `mask_func`. Default `nothing`.
   - `mask_func`: A `Function` defining the mask for the relaxation. Should be 1 for full relaxation, and 0 for no relaxation. Arguments should be non-flat spatial dimensions and `mask_params`. Default `nothing`.
+  - `discrete_relaxation`: A `Bool` indicating whether to use discrete-form relaxation. Default: `false`.
 # Example:
 
 ```jldoctest offline config
@@ -249,7 +252,8 @@ function OfflineFilterConfig(; original_data_filename::String,
                             boundary_relaxation::Bool = false,
                             relax_timescale::Union{Real, Nothing} = nothing,
                             mask_params::Union{NamedTuple, Nothing} = nothing,
-                            mask_func::Union{Function, Nothing}  = nothing
+                            mask_func::Union{Function, Nothing}  = nothing,
+                            discrete_relaxation::Bool = false
                             )
 
     # Check that the original file exists 
@@ -476,11 +480,17 @@ You can continue, but you should consider setting `map_to_mean=false` as the map
             end
             # We'll also check the number of args is correct
             num_args = first(methods(mask_func)).nargs - 2 # First argument is self, last is mask_params
-            num_non_flat = count(T -> T !== Flat, topology(grid))
-            if num_args != num_non_flat
-                error("mask_func has the wrong number of arguments")
+            if discrete_relaxation
+                # discrete forcing passes (i, j, k, grid, mask_params) => num_args counts (i,j,k,grid)
+                if num_args != 4
+                    error("With discrete_relaxation = true, mask_func must take 5 arguments: (i, j, k, grid, mask_params)")
+                end
+            else
+                num_non_flat = count(T -> T !== Flat, topology(grid))
+                if num_args != num_non_flat
+                    error("mask_func has the wrong number of arguments")
+                end
             end
-
         end
     end
     
@@ -511,7 +521,8 @@ You can continue, but you should consider setting `map_to_mean=false` as the map
                             boundary_relaxation,
                             relax_timescale,
                             mask_params,
-                            mask_func
+                            mask_func,
+                            discrete_relaxation
                             )
 
 end
