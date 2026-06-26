@@ -1,4 +1,5 @@
 using Oceananigans: AbstractModel
+using Oceananigans.ImmersedBoundaries: mask_immersed_field!
 
 """
     copy_file_metadata!(original_file::JLD2.JLDFile, new_file::JLD2.JLDFile,
@@ -1032,12 +1033,14 @@ function update_input_data!(model::AbstractModel, input_data::NamedTuple)
     for vel_fts in velocity_timeseries
         field = getproperty(model.velocities, Symbol(vel_fts.name))
         parent(field) .= parent(vel_fts[Time(t)]) # This also fills the halo regions, which we'll need to help with the filtered field boundaries
+        mask_immersed_field!(field) # Zero immersed-cell velocities (overkill ?)
     end
-    
+
     # We also update the saved original variables to be used for forcing - these are auxiliary fields so need to be set separately
     for original_var_fts in original_var_timeseries
         field = getproperty(model.auxiliary_fields, Symbol(original_var_fts.name))
         parent(field) .= parent(original_var_fts[Time(t)]) # This also fills the halo regions, which we'll need to help with the filtered field boundaries
+        mask_immersed_field!(field) # Zero immersed-cell relaxation source so forcing cannot nudge tracers below topography (same, overkill?)
     end
 
     
