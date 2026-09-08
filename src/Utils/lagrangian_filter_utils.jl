@@ -361,6 +361,60 @@ function set_online_BW_filter_params(;N::Int=1,freq_c::Real=1)
 end
 
 """
+    _uses_exponential_kernel(filter_params::NamedTuple)
+
+True if `filter_params` describes the exponential-window (spectral) kernel, whose
+sine components are odd in `t - s` and therefore combine as forward − backward.
+"""
+_uses_exponential_kernel(filter_params::NamedTuple) =
+    get(filter_params, :kernel, :butterworth) === :exponential_window
+
+
+"""
+    set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
+
+Coefficients for the exponentially-windowed spectral estimator, which measures the
+Lagrangian power spectrum at each frequency in `freqs` rather than low-passing.
+
+The window is `w(t) = exp(-alpha|t|)`, normalised by sqrt(alpha), giving quadrature weights
+
+    C(t;omega_n) = √alpha ∫ g(s) exp(-alpha|t-s|) cos(omega_n(t-s)) ds
+    S(t;omega_n) = √alpha ∫ g(s) exp(-alpha|t-s|) sin(omega_n(t-s)) ds
+
+sine components are **odd** in `t - s` and must be combined as forward minus backward.
+
+Each frequency needs two exponentials, so `M` frequencies use `N = 2M` exponentials
+and `N_coeffs = M` sets of coefficients.
+
+`alpha` sets the frequency resolution: choose alpha <= Δomega` for the smallest separation 
+to resolve (window's temporal extent is ~1/alpha)
+
+Arguments
+=========
+- `alpha`: Decay rate of the exponential window. Must be positive.
+- `freqs`: Frequencies `omega_n` (radians per unit time) band-passed frequencies
+
+Returns
+=======
+- A `NamedTuple` of coefficients, `N_coeffs`, and `kernel = :exponential_window`.
+"""
+function set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
+
+    alpha > 0 || error("alpha must be positive.")
+    N_coeffs = length(freqs)
+    N_coeffs > 0 || error("`freqs` must contain at least one frequency.")
+
+    filter_params = NamedTuple()
+    for (n, omega) in enumerate(freqs)
+        temp_params = NamedTuple{(Symbol("a$n"), Symbol("b$n"), Symbol("c$n"), Symbol("d$n"))}(
+                                 (sqrt(alpha), sqrt(alpha), alpha , omega))
+        filter_params = merge(filter_params, temp_params)
+    end
+
+    return merge(filter_params, (; N_coeffs = N_coeffs, kernel = :exponential_window))
+end
+
+"""
     create_original_vars(config::AbstractConfig)
 
 Creates a `NamedTuple` to serve as auxiliary fields for the original variables 
@@ -864,6 +918,48 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
     end
 end
 
+# Per-frequency output names for the exponential window kernel. 
+# for `create_output_fields` and `filtered_output_names` 
+_spectral_component_names(base::String, N_coeffs) =
+    (Tuple(base * "_C$n" for n in 1:N_coeffs), Tuple(base * "_S$n" for n in 1:N_coeffs))
+
+"""
+    filtered_output_names(config::AbstractConfig)
+
+Names of the filtered fields written by `create_output_fields`, split by the parity
+of their weight function in `t - s`: `even_names` combine as forward plus backward,
+`odd_names` as forward minus backward.
+
+For the Butterworth kernels the cosine and sine components are pre-combined into a
+single even field per variable, so `odd_names` is empty. For the exponential window
+kernel each frequency is written separately and the sine components are odd.
+
+Returns
+=======
+- A tuple `(even_names, odd_names)` of `String` tuples.
+"""
+function filtered_output_names(config::AbstractConfig)
+
+    filter_identifier = (config isa AbstractOfflineConfig) && config.advection === nothing ?
+                        "_Eulerian_filtered" : "_Lagrangian_filtered"
+
+    even_names = String[]
+    odd_names  = String[]
+
+    for var_name in config.var_names_to_filter
+        base = var_name * config.label * filter_identifier
+        if _uses_exponential_kernel(config.filter_params)
+            C_names, S_names = _spectral_component_names(base, config.filter_params.N_coeffs)
+            append!(even_names, C_names)
+            append!(odd_names,  S_names)
+        else
+            push!(even_names, base)
+        end
+    end
+
+    return Tuple(even_names), Tuple(odd_names)
+end
+
 """
     create_output_fields(model::AbstractModel, config::AbstractConfig)
 
@@ -915,7 +1011,20 @@ function create_output_fields(model::AbstractModel, config::AbstractConfig)
 
     for var_name in var_names_to_filter
         labelled_var_name = var_name * label
-        if N_coeffs == 0.5
+        if _uses_exponential_kernel(filter_params)
+            #  write the cosine and sine components at each frequency
+            # separately rather than pre-combining them
+            base = labelled_var_name * filter_identifier
+            C_names, S_names = _spectral_component_names(base, N_coeffs)
+            for n in 1:N_coeffs
+                a = getproperty(filter_params, Symbol("a$n"))
+                b = getproperty(filter_params, Symbol("b$n"))
+                gCn = getproperty(model.tracers, Symbol(labelled_var_name * "_C$n"))
+                gSn = getproperty(model.tracers, Symbol(labelled_var_name * "_S$n"))
+                outputs_dict[C_names[n]] = a * gCn
+                outputs_dict[S_names[n]] = b * gSn
+            end
+        elseif N_coeffs == 0.5
             # Special case, single exponential only has a cosine component
             gC1 = getproperty(model.tracers,Symbol(labelled_var_name * "_C1"))
             g_total = filter_params.a1 * gC1

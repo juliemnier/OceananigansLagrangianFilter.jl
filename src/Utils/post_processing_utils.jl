@@ -24,11 +24,13 @@ The function performs the following steps:
     the final output.
 2.  **Copies metadata and unfiltered data**: The file structure, metadata,
     and the original, unfiltered data are copied from the forward output file.
-3.  **Sums filtered contributions**: For each filtered variable, the data
+3.  **Combines filtered contributions**: For each filtered variable, the data
     from the backward output file is loaded as a `FieldTimeSeries`. The data
     is then interpolated to match the time steps of the forward simulation,
-    and the two datasets are summed and written to the combined output file.
-
+    and the two datasets are combined and written to the combined output file.
+    Variables with an even weight function are summed; those with an odd weight
+    function (the sine components of the exponential window kernel, and the
+    mean velocities) have the backward contribution subtracted instead.
 Arguments
 =========
 - `config`: An instance of `AbstractConfig` containing the file paths and
@@ -41,9 +43,17 @@ Arguments
   combined.
 - `extra_original_data_names::Tuple{Vararg{String}}=()`: Optional tuple of additional
   original names that have been output and should be copied to the combined output file.
+- `odd_var_names::Tuple{Vararg{String}}=()`:  Optional tuple of filtered variable names
+  whose weight function is odd in `t - s`. These are combined as forward minus backward
+  rather than summed, since the backward pass returns them mirrored. Populated
+  automatically with the per-frequency sine components when `filter_params` selects the
+  exponential window kernel.
+
 """
 function sum_forward_backward_contributions!(config::AbstractConfig; extra_filtered_var_names::Tuple{Vararg{String}}=(), 
-    extra_filtered_velocity_names::Tuple{Vararg{String}}=(), extra_original_data_names::Tuple{Vararg{String}}=())
+    extra_filtered_velocity_names::Tuple{Vararg{String}}=(), extra_original_data_names::Tuple{Vararg{String}}=(),
+    odd_var_names::Tuple{Vararg{String}}=())
+
     # Combine the forward and backward simulations by summing them into a single file
 
     output_filename = config.output_filename
@@ -62,15 +72,20 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
     else
         filter_identifier = "_Lagrangian_filtered"
     end
-
+    
     # List the names of the fields that we will combine
     filtered_var_names = Tuple([var * label * filter_identifier for var in var_names_to_filter])
+
     if map_to_mean
         filtered_var_names = (Tuple(["xi_" * vel * label for vel in velocity_names])..., filtered_var_names...)
     end
 
     # There might be some extra filtered variables that the user defined that we should combine too
     filtered_var_names = Tuple(unique((filtered_var_names..., extra_filtered_var_names...)))
+
+    # Fields whose weight function is odd combine as forward minus backward
+    _, auto_odd_names = filtered_output_names(config)
+    odd_var_names = Tuple(unique((auto_odd_names..., odd_var_names...)))
 
     filtered_vel_names = ()
     vel_names_to_filter = ()
@@ -80,7 +95,8 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
     end
 
     # There might be some extra filtered velocities that the user defined that we should combine too
-    filtered_vel_names = Tuple(unique((filtered_vel_names..., extra_filtered_velocity_names...)))
+    # Odd-parity variables join them: both are combined as forward minus backward.
+    filtered_vel_names = Tuple(unique((filtered_vel_names..., extra_filtered_velocity_names..., odd_var_names...)))
 
     jldopen(output_filename,"w") do combined_file
         jldopen(forward_output_filename,"r") do forward_file
@@ -1161,31 +1177,62 @@ Keyword arguments
   "both" (default), "forward", or "backward". This determines whether the
   filter is applied symmetrically around `tref`, only to past times, or only
   to future times.
+  - `component`: A `String`, `"C"` or `"S"`, selecting the cosine or sine component
+  when `filter_params` uses the exponential window kernel, whose components are
+  written as separate outputs. Not used for the Butterworth kernels, which combine
+  their components into a single weight function.
+- `index`: The frequency to return when `component` applies. Not used for the
+  Butterworth kernels.
 
 Returns
 =======
 - A vector of weights `G`, with the same dimensions as `t`, representing the
   value of the filter's impulse response at each time point relative to `tref`.
 """
-function get_weight_function(;t::AbstractArray, tref::Real, filter_params::NamedTuple, direction::String = "both")
+function get_weight_function(;t::AbstractArray, tref::Real, filter_params::NamedTuple,
+                             direction::String = "both", component::String = "C",
+                             index::Int = 1)
 
     G = 0*t
     N_coeffs = filter_params.N_coeffs
-    if N_coeffs == 0.5
-        a1 = filter_params.a1
-        c1 = filter_params.c1
-        G .= a1.*exp.(-c1.*abs.(t .- tref))
-    else
-        for i in 1:N_coeffs
-            
-            a = getproperty(filter_params, Symbol("a$i"))
-            b = getproperty(filter_params, Symbol("b$i"))
-            c = getproperty(filter_params, Symbol("c$i"))
-            d = getproperty(filter_params, Symbol("d$i"))
 
-            G += (a.*cos.(d.*abs.(t .- tref)) .+ b.*sin.(d.*abs.(t .- tref))).*exp.(-c.*abs.(t .- tref))
+    τ = tref .- t
+
+    if _uses_exponential_kernel(filter_params)
+        # Band-pass estimator:sin(d*τ) is odd in τ
+        # the S components combine as forward minus backward.
+        1 <= index <= N_coeffs || error("index must be between 1 and $N_coeffs, got $index")
+
+        c = getproperty(filter_params, Symbol("c$index"))
+        d = getproperty(filter_params, Symbol("d$index"))
+        if component == "C"
+            a = getproperty(filter_params, Symbol("a$index"))
+            G .= a.*cos.(d.*τ).*exp.(-c.*abs.(τ))
+        elseif component == "S"
+            b = getproperty(filter_params, Symbol("b$index"))
+            G .= b.*sin.(d.*τ).*exp.(-c.*abs.(τ))
+        else
+            error("Component must be 'C' or 'S'")
+        end
+
+    else
+        # Butterworth kernels pre-combine their components into a single even kernel with sin(d*|τ|)
+        if N_coeffs == 0.5
+            a1 = filter_params.a1
+            c1 = filter_params.c1
+            G .= a1.*exp.(-c1.*abs.(τ))
+        else
+            for i in 1:N_coeffs
+                a = getproperty(filter_params, Symbol("a$i"))
+                b = getproperty(filter_params, Symbol("b$i"))
+                c = getproperty(filter_params, Symbol("c$i"))
+                d = getproperty(filter_params, Symbol("d$i"))
+
+                G += (a.*cos.(d.*abs.(τ)) .+ b.*sin.(d.*abs.(τ))).*exp.(-c.*abs.(τ))
+            end
         end
     end
+
     if direction == "forward"
         G[t .> tref] .= 0
     elseif direction == "backward"
