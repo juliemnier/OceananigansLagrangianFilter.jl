@@ -361,38 +361,42 @@ function set_online_BW_filter_params(;N::Int=1,freq_c::Real=1)
 end
 
 """
-    _uses_exponential_kernel(filter_params::NamedTuple)
+    uses_exponential_kernel(filter_params::NamedTuple)
 
 True if `filter_params` describes the exponential-window (spectral) kernel, whose
 sine components are odd in `t - s` and therefore combine as forward − backward.
 """
-_uses_exponential_kernel(filter_params::NamedTuple) =
+uses_exponential_kernel(filter_params::NamedTuple) =
     get(filter_params, :kernel, :butterworth) === :exponential_window
 
 
 """
     set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
 
-Coefficients for the exponentially-windowed spectral estimator, which measures the
-Lagrangian power spectrum at each frequency in `freqs` rather than low-passing.
+Coefficients for an exponentially-windowed band-pass filter, which extracts the wave
+field in a narrow band around each frequency in `freqs` rather than low-passing.
 
-The window is `w(t) = exp(-alpha|t|)`, normalised by sqrt(alpha), giving quadrature weights
+The window is `w(t) = exp(-alpha*|t|)`, giving the quadrature weight functions
 
-    C(t;omega_n) = √alpha ∫ g(s) exp(-alpha|t-s|) cos(omega_n(t-s)) ds
-    S(t;omega_n) = √alpha ∫ g(s) exp(-alpha|t-s|) sin(omega_n(t-s)) ds
+    C(t;omega) = N ∫ g(s) exp(-alpha*|t-s|) cos(omega*(t-s)) ds
+    S(t;omega) = N ∫ g(s) exp(-alpha*|t-s|) sin(omega*(t-s)) ds
 
-sine components are **odd** in `t - s` and must be combined as forward minus backward.
+with `a_n = b_n = N`, `c_n = alpha` and `d_n = omega_n`.
+the S components are **odd** in `t - s` and are combined as
+forward minus backward
 
-Each frequency needs two exponentials, so `M` frequencies use `N = 2M` exponentials
-and `N_coeffs = M` sets of coefficients.
+`C` is the band-passed field itself: `N` is chosen so a wave at exactly `omega` passes
+through with its amplitude preserved. `S` is its quadrature, so `sqrt(C^2 + S^2)` is the
+wave envelope and `atan(-S, C)` the local phase. 
+At `omega = 0` the normalisation reduces to `alpha/2`, recovering `set_offline_BW2_filter_params(N=1)`.
 
-`alpha` sets the frequency resolution: choose alpha <= Δomega` for the smallest separation 
-to resolve (window's temporal extent is ~1/alpha)
+A band-pass defines no mean position, so `map_to_mean` and `compute_mean_velocities`
+are forced to `false`.
 
 Arguments
 =========
-- `alpha`: Decay rate of the exponential window. Must be positive.
-- `freqs`: Frequencies `omega_n` (radians per unit time) band-passed frequencies
+- `alpha`: Decay rate of the exponential window, setting the bandwidth. Must be positive.
+- `freqs`: Centre frequencies (radians per unit time) of the bands to extract.
 
 Returns
 =======
@@ -401,13 +405,18 @@ Returns
 function set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
 
     alpha > 0 || error("alpha must be positive.")
-    N_coeffs = length(freqs)
-    N_coeffs > 0 || error("`freqs` must contain at least one frequency.")
+    length(freqs) > 0 || error("`freqs` must contain at least one frequency.")
 
+    N_coeffs = length(freqs)
     filter_params = NamedTuple()
+
     for (n, omega) in enumerate(freqs)
+        # Unit gain at omega
+        # Reduces to alpha/2 at omega = 0, and tends to alpha for omega >> alpha.
+        N = alpha*(alpha^2 + 4*omega^2)/(2*alpha^2 + 4*omega^2)
+
         temp_params = NamedTuple{(Symbol("a$n"), Symbol("b$n"), Symbol("c$n"), Symbol("d$n"))}(
-                                 (sqrt(alpha), sqrt(alpha), alpha , omega))
+                                 (N, N, alpha, omega))
         filter_params = merge(filter_params, temp_params)
     end
 
@@ -948,7 +957,7 @@ function filtered_output_names(config::AbstractConfig)
 
     for var_name in config.var_names_to_filter
         base = var_name * config.label * filter_identifier
-        if _uses_exponential_kernel(config.filter_params)
+        if uses_exponential_kernel(config.filter_params)
             C_names, S_names = _spectral_component_names(base, config.filter_params.N_coeffs)
             append!(even_names, C_names)
             append!(odd_names,  S_names)
@@ -1011,7 +1020,7 @@ function create_output_fields(model::AbstractModel, config::AbstractConfig)
 
     for var_name in var_names_to_filter
         labelled_var_name = var_name * label
-        if _uses_exponential_kernel(filter_params)
+        if uses_exponential_kernel(filter_params)
             #  write the cosine and sine components at each frequency
             # separately rather than pre-combining them
             base = labelled_var_name * filter_identifier

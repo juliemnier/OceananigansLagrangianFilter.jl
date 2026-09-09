@@ -1198,7 +1198,7 @@ function get_weight_function(;t::AbstractArray, tref::Real, filter_params::Named
 
     τ = tref .- t
 
-    if _uses_exponential_kernel(filter_params)
+    if uses_exponential_kernel(filter_params)
         # Band-pass estimator:sin(d*τ) is odd in τ
         # the S components combine as forward minus backward.
         1 <= index <= N_coeffs || error("index must be between 1 and $N_coeffs, got $index")
@@ -1375,6 +1375,10 @@ function compute_Eulerian_filter!(config::AbstractConfig)
     compute_mean_velocities = config.compute_mean_velocities
     velocity_names = config.velocity_names
     label = config.label
+
+    if uses_exponential_kernel(filter_params)
+        error("compute_Eulerian_filter! does not yet support the exponential window kernel. Set compute_Eulerian_filter=false.")
+    end
 
     var_names_to_Eulerian_filter = var_names_to_filter
     if compute_mean_velocities

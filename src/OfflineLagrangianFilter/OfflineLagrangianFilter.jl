@@ -27,6 +27,7 @@ import Oceananigans.OutputWriters: default_included_properties
 export OfflineFilterConfig, run_offline_Lagrangian_filter, LagrangianFilter
 
 using ..Utils
+using ..Utils: uses_exponential_kernel
 
 include("run_offline_lagrangian_filter.jl")
 include("lagrangian_filter.jl")
@@ -405,19 +406,31 @@ any other velocity components will be zero by default."
     end
 
     # Check normalisation of filter coefficients
-    if filter_params.N_coeffs == 0.5
-        if !(filter_params.a1*2 ≈ filter_params.c1)
-            @warn "Filter coefficients are not normalised: 2*a1=$(2*filter_params.a1) != c1=$(filter_params.c1). 
-You can continue, but you should consider setting `map_to_mean=false` as the map may be meaningless."
+    if uses_exponential_kernel(filter_params)
+        if filter_params.N_coeffs == 0.5
+            error("The exponential window kernel needs a sine component at each frequency, so N_coeffs = 0.5 is not valid. Use set_offline_exponential_filter_params.")
+        end
+        if map_to_mean || compute_mean_velocities
+            @warn "The exponential window kernel is a band-pass, so it does not define a mean position or mean velocity.
+    Setting map_to_mean=false and compute_mean_velocities=false."
+            map_to_mean = false
+            compute_mean_velocities = false
         end
     else
-        a_coeffs = [filter_params[Symbol("a",i)] for i in 1:filter_params.N_coeffs]
-        b_coeffs = [filter_params[Symbol("b",i)] for i in 1:filter_params.N_coeffs]
-        c_coeffs = [filter_params[Symbol("c",i)] for i in 1:filter_params.N_coeffs] 
-        d_coeffs = [filter_params[Symbol("d",i)] for i in 1:filter_params.N_coeffs]
-        if !(sum((a_coeffs.*c_coeffs + b_coeffs.*d_coeffs)./(c_coeffs.^2 + d_coeffs.^2) ) ≈ 1/2)
-            @warn "Filter coefficients are not normalised: $(sum((a_coeffs.*c_coeffs + b_coeffs.*d_coeffs)./(c_coeffs.^2 + d_coeffs.^2) )) != 0.5
-You can continue, but you should consider setting `map_to_mean=false` as the map may be meaningless."
+        if filter_params.N_coeffs == 0.5
+            if !(filter_params.a1*2 ≈ filter_params.c1)
+                @warn "Filter coefficients are not normalised: 2*a1=$(2*filter_params.a1) != c1=$(filter_params.c1). 
+    You can continue, but you should consider setting `map_to_mean=false` as the map may be meaningless."
+            end
+        else
+            a_coeffs = [filter_params[Symbol("a",i)] for i in 1:filter_params.N_coeffs]
+            b_coeffs = [filter_params[Symbol("b",i)] for i in 1:filter_params.N_coeffs]
+            c_coeffs = [filter_params[Symbol("c",i)] for i in 1:filter_params.N_coeffs] 
+            d_coeffs = [filter_params[Symbol("d",i)] for i in 1:filter_params.N_coeffs]
+            if !(sum((a_coeffs.*c_coeffs + b_coeffs.*d_coeffs)./(c_coeffs.^2 + d_coeffs.^2) ) ≈ 1/2)
+                @warn "Filter coefficients are not normalised: $(sum((a_coeffs.*c_coeffs + b_coeffs.*d_coeffs)./(c_coeffs.^2 + d_coeffs.^2) )) != 0.5
+    You can continue, but you should consider setting `map_to_mean=false` as the map may be meaningless."
+            end
         end
     end
 
