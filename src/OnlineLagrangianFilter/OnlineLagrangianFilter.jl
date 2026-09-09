@@ -199,6 +199,10 @@ function OnlineFilterConfig(; grid::AbstractGrid,
 
         end
     end
+    
+    if uses_exponential_kernel(filter_params)
+        error("The exponential window kernel is currently offline only. Use set_online_BW_filter_params for online filtering.")
+    end
 
     # Check normalisation of filter coefficients
     if filter_params.N_coeffs == 0.5

@@ -27,7 +27,6 @@ import Oceananigans.OutputWriters: default_included_properties
 export OfflineFilterConfig, run_offline_Lagrangian_filter, LagrangianFilter
 
 using ..Utils
-using ..Utils: uses_exponential_kernel
 
 include("run_offline_lagrangian_filter.jl")
 include("lagrangian_filter.jl")
