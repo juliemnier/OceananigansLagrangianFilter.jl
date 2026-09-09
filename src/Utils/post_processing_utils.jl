@@ -1265,11 +1265,29 @@ Returns
 - A vector `Ghat` representing the filter's frequency response at each
   corresponding frequency in `freq`.
 """
-function get_offline_frequency_response(;freq::AbstractArray, filter_params::NamedTuple)
+function get_offline_frequency_response(;freq::AbstractArray, filter_params::NamedTuple, component::String = "C", index::Int = 1)
     
     Ghat = 0*freq
     N_coeffs = filter_params.N_coeffs
- 
+    
+    if uses_exponential_kernel(filter_params)
+        1 <= index <= N_coeffs || error("index must be between 1 and $N_coeffs, got $index")
+
+        c = getproperty(filter_params, Symbol("c$index"))
+        d = getproperty(filter_params, Symbol("d$index"))
+        Lm = 1 ./ (c^2 .+ (freq .- d).^2)
+        Lp = 1 ./ (c^2 .+ (freq .+ d).^2)
+
+        if component == "C"
+            a = getproperty(filter_params, Symbol("a$index"))
+            return a .* c .* (Lm .+ Lp)
+        elseif component == "S"
+            b = getproperty(filter_params, Symbol("b$index"))
+            return b .* c .* (Lm .- Lp)
+        else
+            error("Component must be 'C' or 'S'")
+        end
+    end
     if N_coeffs == 0.5
         a1 = filter_params.a1
         c1 = filter_params.c1
@@ -1451,7 +1469,10 @@ function compute_time_shift!(config::AbstractConfig)
         it may not be meaningful for offline forward-backward filters."
     end
     output_filename = config.output_filename
-    filter_params = config.filter_params    
+    filter_params = config.filter_params  
+    if uses_exponential_kernel(filter_params)
+        @warn "The exponential window kernel's weight function is neither even nor odd, so the group delay computed here is not a meaningful time shift for it."
+    end  
     N_coeffs = filter_params.N_coeffs
     time_shift = 0.0
     if N_coeffs == 0.5 # exponential special case
