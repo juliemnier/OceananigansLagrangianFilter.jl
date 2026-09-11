@@ -84,3 +84,9 @@ docs/local_compile.sh
 
 # Zenodo metadata file
 !.zenodo.json
+
+# Personal scratch notes
+EXPONENTIAL_KERNEL_SUMMARY.txt
+
+# No longer tracked - untracked example, kept locally only
+examples/offline_filter_lee_wave_noIB.jl
