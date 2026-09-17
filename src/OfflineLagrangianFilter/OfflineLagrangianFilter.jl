@@ -93,6 +93,7 @@ struct OfflineFilterConfig <: AbstractOfflineConfig
     Δt::Real
     backend::AbstractInMemoryBackend
     map_to_mean::Bool
+    regrid_to_mean::Bool
     forward_output_filename::String
     backward_output_filename::String
     output_filename::String
@@ -128,6 +129,7 @@ end
                         Δt::Union{Real,Nothing} = nothing,
                         backend::AbstractInMemoryBackend = InMemory(4),
                         map_to_mean::Bool = true,
+                        regrid_to_mean::Bool = map_to_mean,
                         forward_output_filename::String = "forward_output.jld2",
                         backward_output_filename::String = "backward_output.jld2",
                         output_filename::String = "filtered_output.jld2",
@@ -167,6 +169,7 @@ Keyword arguments
   - `Δt`: The time step for the internal Lagrangian filter simulation. If `nothing`, it defaults to `T_out / 10`, but this may not be appropriate.
   - `backend`: The backend for loading `FieldTimeSeries` data. See `Oceananigans.Fields.FieldTimeSeries`. Default: `InMemory(4)`.
   - `map_to_mean`: A `Bool` indicating whether to map filtered data to the mean position (i.e. calculate generalised Lagrangian mean). Default: `true`.
+  - `regrid_to_mean`: A `Bool` indicating whether to perform the final interpolation of the filtered fields onto the mean position. Requires `map_to_mean = true`. Set to `false` to write the ξ maps without paying for the regridding. Default: `map_to_mean`.
   - `forward_output_filename`: The filename for the output of the forward filter pass. Default: `"forward_output.jld2"`.
   - `backward_output_filename`: The filename for the output of the backward filter pass. Default: `"backward_output.jld2"`.
   - `output_filename`: The filename for the final combined and mapped output. Default: `"filtered_output.jld2"`.
@@ -237,6 +240,7 @@ function OfflineFilterConfig(; original_data_filename::String,
                             Δt::Union{Real,Nothing} = nothing,
                             backend::AbstractInMemoryBackend = InMemory(4),
                             map_to_mean::Bool = true,
+                            regrid_to_mean::Bool = map_to_mean,
                             forward_output_filename::String = "forward_output.jld2",
                             backward_output_filename::String = "backward_output.jld2",
                             output_filename::String = "filtered_output.jld2",
@@ -438,7 +442,8 @@ You can continue, but you should consider setting `map_to_mean=false` as the map
 
     # Give warning about interpolation if grid is not RectilinearGrid and turn off interpolation for now
     if !underlying_rectilinear_grid && map_to_mean
-        @warn "The final interpolation to mean position currently only works for RectilinearGrids - consider setting map_to_mean=false"
+        @warn "The final interpolation to mean position currently only works for RectilinearGrids - consider setting map_to_mean=falseThe ξ maps will still be written if map_to_mean=true."
+        regrid_to_mean = false
     end
 
     underlying_latlon_grid = (grid isa LatitudeLongitudeGrid) || ((grid isa ImmersedBoundaryGrid) && (grid.underlying_grid isa LatitudeLongitudeGrid))
@@ -456,7 +461,8 @@ You can continue, but you should consider setting `map_to_mean=false` as the map
     elseif isnothing(advection) 
         @info "Advection scheme is 'nothing' so the Eulerian (not Lagrangian) filter will be computed."
     end
-
+    # Regridding needs the displacement maps
+    regrid_to_mean = regrid_to_mean && map_to_mean
     # Warn if Eulerian filter is being calculated twice
     if compute_Eulerian_filter && isnothing(advection)
         @warn "compute_Eulerian_filter=true and advection is 'nothing' - Eulerian filter will be computed twice, so you should probably set compute_Eulerian_filter=false."
@@ -507,6 +513,7 @@ You can continue, but you should consider setting `map_to_mean=false` as the map
                             Δt,
                             backend,
                             map_to_mean,
+                            regrid_to_mean,
                             forward_output_filename,
                             backward_output_filename,
                             output_filename,
