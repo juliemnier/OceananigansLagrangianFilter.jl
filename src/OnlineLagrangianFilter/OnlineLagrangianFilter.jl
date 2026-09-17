@@ -31,6 +31,7 @@ struct OnlineFilterConfig <: AbstractOnlineConfig
     relax_timescale::Union{Real, Nothing}
     mask_params::Union{NamedTuple, Nothing}
     mask_func::Union{Function, Nothing}
+    discrete_relaxation::Bool
 end
 
 """
@@ -100,15 +101,15 @@ filter_config = OnlineFilterConfig( grid = grid,
                                     freq_c = 1e-4/2)
 
 # output
-┌ Info: Advection for Lagrangian filtering will be performed using full model velocities u, v, and w. 
+┌ Info: Advection for Lagrangian filtering will be performed using full model velocities u, v, and w.
 └         Maps for regridding to mean position will be computed corresponding to velocities: ("u", "w").
 [ Info: Mean velocities corresponding to ("u", "w") will be computed.
 [ Info: Variables to be filtered: ("b", "T"). Ensure these are valid tracer or auxiliary field names in the simulation.
 [ Info: Setting filter parameters to use Butterworth order 2, cutoff frequency 5.0e-5
 OnlineFilterConfig(50×1×20 RectilinearGrid{Float64, Periodic, Flat, Bounded} on CPU with 3×0×3 halo
 ├── Periodic x ∈ [-5000.0, 5000.0) regularly spaced with Δx=200.0
-├── Flat y                         
-└── Bounded  z ∈ [-100.0, 0.0]     regularly spaced with Δz=5.0, "test_filter.jld2", ("b", "T"), ("u", "w"), (a1 = 1.421067568548072e-20, b1 = -7.071067811865475e-5, c1 = 3.535533905932738e-5, d1 = -3.535533905932738e-5, N_coeffs = 1), true, true, 5, "online", "")
+├── Flat y
+└── Bounded  z ∈ [-100.0, 0.0]     regularly spaced with Δz=5.0, "test_filter.jld2", ("b", "T"), ("u", "w"), (a1 = 1.421067568548072e-20, b1 = -7.071067811865475e-5, c1 = 3.535533905932738e-5, d1 = -3.535533905932738e-5, N_coeffs = 1), true, true, 5, "", false, nothing, nothing, nothing)
 ```
 
 
@@ -127,7 +128,8 @@ function OnlineFilterConfig(; grid::AbstractGrid,
                             boundary_relaxation::Bool = false,
                             relax_timescale::Union{Real, Nothing} = nothing,
                             mask_params::Union{NamedTuple, Nothing} = nothing,
-                            mask_func::Union{Function, Nothing}  = nothing
+                            mask_func::Union{Function, Nothing}  = nothing,
+                            discrete_relaxation::Bool = false
                             )
 
     # Check that velocities aren't in the var_names_to_filter
@@ -199,6 +201,10 @@ function OnlineFilterConfig(; grid::AbstractGrid,
 
         end
     end
+    
+    if uses_exponential_kernel(filter_params)
+        error("The exponential window kernel is currently offline only. Use set_online_BW_filter_params for online filtering.")
+    end
 
     # Check normalisation of filter coefficients
     if filter_params.N_coeffs == 0.5
@@ -269,7 +275,8 @@ You can continue, but setting `map_to_mean=false` as the map is now meaningless.
                             boundary_relaxation,
                             relax_timescale,
                             mask_params,
-                            mask_func
+                            mask_func,
+                            discrete_relaxation
                             )
  
 end

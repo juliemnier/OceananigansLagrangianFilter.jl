@@ -362,6 +362,69 @@ function set_online_BW_filter_params(;N::Int=1,freq_c::Real=1)
 end
 
 """
+    uses_exponential_kernel(filter_params::NamedTuple)
+
+True if `filter_params` describes the exponential-window (spectral) kernel, whose
+sine components are odd in `t - s` and therefore combine as forward − backward.
+"""
+uses_exponential_kernel(filter_params::NamedTuple) =
+    get(filter_params, :kernel, :butterworth) === :exponential_window
+
+
+"""
+    set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
+
+Coefficients for an exponentially-windowed band-pass filter, which extracts the wave
+field in a narrow band around each frequency in `freqs` rather than low-passing.
+
+The window is `w(t) = exp(-alpha*|t|)`, giving the quadrature weight functions
+
+    C(t;omega) = N ∫ g(s) exp(-alpha*|t-s|) cos(omega*(t-s)) ds
+    S(t;omega) = N ∫ g(s) exp(-alpha*|t-s|) sin(omega*(t-s)) ds
+
+with `a_n = b_n = N`, `c_n = alpha` and `d_n = omega_n`.
+the S components are **odd** in `t - s` and are combined as
+forward minus backward
+
+`C` is the band-passed field itself: `N` is chosen so a wave at exactly `omega` passes
+through with its amplitude preserved. `S` is its quadrature, so `sqrt(C^2 + S^2)` is the
+wave envelope and `atan(-S, C)` the local phase. 
+At `omega = 0` the normalisation reduces to `alpha/2`, recovering `set_offline_BW2_filter_params(N=1)`.
+
+A band-pass defines no mean position, so `map_to_mean` and `compute_mean_velocities`
+are forced to `false`.
+
+Arguments
+=========
+- `alpha`: Decay rate of the exponential window, setting the bandwidth. Must be positive.
+- `freqs`: Centre frequencies (radians per unit time) of the bands to extract.
+
+Returns
+=======
+- A `NamedTuple` of coefficients, `N_coeffs`, and `kernel = :exponential_window`.
+"""
+function set_offline_exponential_filter_params(; alpha::Real, freqs::AbstractVector)
+
+    alpha > 0 || error("alpha must be positive.")
+    length(freqs) > 0 || error("`freqs` must contain at least one frequency.")
+
+    N_coeffs = length(freqs)
+    filter_params = NamedTuple()
+
+    for (n, omega) in enumerate(freqs)
+        # Unit gain at omega
+        # Reduces to alpha/2 at omega = 0, and tends to alpha for omega >> alpha.
+        N = alpha*(alpha^2 + 4*omega^2)/(2*alpha^2 + 4*omega^2)
+
+        temp_params = NamedTuple{(Symbol("a$n"), Symbol("b$n"), Symbol("c$n"), Symbol("d$n"))}(
+                                 (N, N, alpha, omega))
+        filter_params = merge(filter_params, temp_params)
+    end
+
+    return merge(filter_params, (; N_coeffs = N_coeffs, kernel = :exponential_window))
+end
+
+"""
     create_original_vars(config::AbstractConfig)
 
 Creates a `NamedTuple` to serve as auxiliary fields for the original variables 
@@ -573,17 +636,62 @@ function _make_xiS_forcing(i::Int, vel_name::String, filter_params::NamedTuple)
     return Forcing(forcing_func, parameters = (c,d), field_dependencies = (Symbol(vel_name),))
 end
 
-
 relaxation_mask_name(label) = Symbol("mask_relaxation" * label)
 
-# Discrete-form relaxation  built as a continuous forcing 
+"""
+    _make_relaxation_forcing(src_key::Symbol, tgt_key::Symbol, coef::Real, invτ::Real, mask_name::Symbol)
+
+Build a relaxation forcing in discrete form for non-rectilinear grids, where evaluating a mask function from spatial coordinates is
+awkward. The mask is supplied as a precomputed field (`mask_name`) rather than evaluated from a function at every point.
+
+The relaxation target for the field being relaxed is `coef * src`, and relaxation
+proceeds at rate `invτ` wherever the mask field is nonzero. 
+
+# Arguments
+- `src_key::Symbol`: The field the relaxation target is computed from (the original
+    variable, or the velocity for map variables).
+- `tgt_key::Symbol`: The field being relaxed (e.g. `:T_C1`).
+- `coef::Real`: Coefficient converting `src` into the relaxation target.
+- `invτ::Real`: Inverse relaxation timescale.
+- `mask_name::Symbol`: Name of the precomputed mask field.
+
+# Returns
+- A `Forcing` object relaxing `tgt_key` towards `coef * src_key` inside the mask.
+"""
 function _make_relaxation_forcing(src_key::Symbol, tgt_key::Symbol, coef::Real, invτ::Real, mask_name::Symbol)
     relax_func = (args...) -> -args[end][2] * (args[end-2] - args[end-3] * args[end][1]) * args[end-1]
     return Forcing(relax_func; field_dependencies = (src_key, tgt_key, mask_name), parameters = (coef, invτ))
 end
 
-# Functions for relaxation. 
-function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+"""
+    _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real,
+     mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+
+Create a relaxation term for the cosine component (gC) of a filtered variable. The
+function handles the special case of a single exponential filter where `d` is zero.
+
+The relaxation target is the steady state of the gC equation under a constant source,
+`g * c/(c² + d²)` (or `g / c` in the single-exponential case)
+
+# Arguments
+- `i::Int`: The index of the coefficient pair (cᵢ, dᵢ) to use from `filter_params`.
+- `labelled_var_name::String`: The name of the variable being filtered (e.g., "T")
+    including label if used.
+- `original_var_name::String`: The name of the original variable (e.g., "T").
+- `filter_params::NamedTuple`: A `NamedTuple` containing all filter coefficients.
+- `relax_timescale::Real`: The timescale over which the relaxation occurs.
+- `mask_func::Union{Function, Nothing}`: A function defining the spatial mask for the
+    relaxation. Used only when `discrete = false`; may be `nothing` otherwise.
+- `mask_params::Union{NamedTuple, Nothing}`: Optional parameters for the mask function.
+- `mask_name::Symbol`: Name of the precomputed mask field, used when `discrete = true`.
+- `discrete::Bool=false`: If `true`, build the forcing from the precomputed mask field
+    `mask_name` instead of evaluating `mask_func`.
+
+# Returns
+- A `Forcing` object configured to compute the relaxation term for the gC field.
+"""
+function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real,
+                             mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     gCkey = Symbol(labelled_var_name,"_C",i)
     var_key = Symbol(original_var_name)
     if discrete
@@ -598,7 +706,7 @@ function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_nam
             # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, relax_timescale, mask_params), and field deps are original variable (args[end-2]), gC (args[end-1])
             # use this general call signature to account for different numbers of spatial variables
             # mask_func takes spatial variables (args[1:end-4] - not time args[end-3]) and mask_params (args[end][3])
-            gC_relaxation_func = (args...) -> -1/args[end][2]*(args[end-1] - args[end-2]/args[end][1]) * mask_func(args[1:end-4]...,args[end][3]) 
+            gC_relaxation_func = (args...) -> -1/args[end][2]*(args[end-1] - args[end-2]/args[end][1]) * mask_func(args[1:end-4]...,args[end][3])
             return Forcing(gC_relaxation_func, parameters = (c, relax_timescale, mask_params), field_dependencies = (var_key, gCkey))
         else
             c = getproperty(filter_params, Symbol("c",i))
@@ -606,14 +714,41 @@ function _make_gC_relaxation(i::Int, labelled_var_name::String, original_var_nam
             # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, d, relax_timescale, mask_params), and field deps are original variable (args[end-2]), gC (args[end-1])
             # use this general call signature to account for different numbers of spatial variables
             # mask_func takes spatial variables (args[1:end-4] - not time args[end-3]) and mask_params (args[end][4])
-            gC_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2] * args[end][1]/(args[end][1]^2 + args[end][2]^2)) * mask_func(args[1:end-4]...,args[end][4]) 
+            gC_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2] * args[end][1]/(args[end][1]^2 + args[end][2]^2)) * mask_func(args[1:end-4]...,args[end][4])
             return Forcing(gC_relaxation_func, parameters = (c, d, relax_timescale, mask_params), field_dependencies = (var_key,gCkey))
         end
     end
 end
 
-# Functions for relaxation. 
-function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+"""
+    _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, 
+                        mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+
+Create a relaxation term for the sine component (gS) of a filtered variable.
+
+The relaxation target is the steady state of the gS equation under a constant source,
+`g * d/(c² + d²)`. There is no single-exponential branch here, since that case
+(`N_coeffs = 0.5`) has no sine component.
+
+# Arguments
+- `i::Int`: The index of the coefficient pair (cᵢ, dᵢ) to use from `filter_params`.
+- `labelled_var_name::String`: The name of the variable being filtered (e.g., "T")
+    including label if used.
+- `original_var_name::String`: The name of the original variable (e.g., "T").
+- `filter_params::NamedTuple`: A `NamedTuple` containing all filter coefficients.
+- `relax_timescale::Real`: The timescale over which the relaxation occurs.
+- `mask_func::Union{Function, Nothing}`: A function defining the spatial mask for the
+    relaxation. Used only when `discrete = false`; may be `nothing` otherwise.
+- `mask_params::Union{NamedTuple, Nothing}`: Optional parameters for the mask function.
+- `mask_name::Symbol`: Name of the precomputed mask field, used when `discrete = true`.
+- `discrete::Bool=false`: If `true`, build the forcing from the precomputed mask field
+    `mask_name` instead of evaluating `mask_func`.
+
+# Returns
+- A `Forcing` object configured to compute the relaxation term for the gS field.
+"""
+function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_name::String, filter_params::NamedTuple, relax_timescale::Real, 
+                            mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     c = getproperty(filter_params, Symbol("c",i))
     d = getproperty(filter_params, Symbol("d",i))
     gSkey = Symbol(labelled_var_name, "_S",i)
@@ -626,13 +761,37 @@ function _make_gS_relaxation(i::Int, labelled_var_name::String, original_var_nam
         # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, d, relax_timescale, mask_params), and field deps are original variable (args[end-2]), gS (args[end-1])
         # use this general call signature to account for different numbers of spatial variables
         # mask_func takes spatial variables (args[1:end-4] - not time args[end-3]) and mask_params (args[end][4])
-        gS_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2]*args[end][2]/(args[end][1]^2 + args[end][2]^2)) * mask_func(args[1:end-4]...,args[end][4]) 
+        gS_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2]*args[end][2]/(args[end][1]^2 + args[end][2]^2)) * mask_func(args[1:end-4]...,args[end][4])
         return Forcing(gS_relaxation_func, parameters = (c, d, relax_timescale, mask_params), field_dependencies = (var_key,gSkey))
     end
 end
 
-# Functions for relaxation. 
-function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+"""
+    _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real,
+                         mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+
+Create a relaxation term for the cosine component (xiC) of a map variable. The
+function handles the special case of a single exponential filter where `d` is zero.
+
+# Arguments
+- `i::Int`: The index of the coefficient pair (cᵢ, dᵢ) to use from `filter_params`.
+- `labelled_var_name::String`: The name of the map variable (e.g., "xi_u")
+    including label if used.
+- `vel_name::String`: The name of the velocity variable (e.g., "u").
+- `filter_params::NamedTuple`: A `NamedTuple` containing all filter coefficients.
+- `relax_timescale::Real`: The timescale over which the relaxation occurs.
+- `mask_func::Union{Function, Nothing}`: A function defining the spatial mask for the
+    relaxation. Used only when `discrete = false`; may be `nothing` otherwise.
+- `mask_params::Union{NamedTuple, Nothing}`: Optional parameters for the mask function.
+- `mask_name::Symbol`: Name of the precomputed mask field, used when `discrete = true`.
+- `discrete::Bool=false`: If `true`, build the forcing from the precomputed mask field
+    `mask_name` instead of evaluating `mask_func`.
+
+# Returns
+- A `Forcing` object configured to compute the relaxation term for the xiC field.
+"""
+function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real,
+                                 mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     xiCkey = Symbol(labelled_var_name,"_C",i)
     vel_key = Symbol(vel_name)
     if discrete
@@ -643,11 +802,11 @@ function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
         return _make_relaxation_forcing(vel_key, xiCkey, coef, invτ, mask_name)
     else
         if filter_params.N_coeffs == 0.5 # Single exponential special case has a simpler forcing
-            c = getproperty(filter_params, Symbol("c",i))    
+            c = getproperty(filter_params, Symbol("c",i))
             # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, relax_timescale, mask_params), and field deps are vel (args[end-2]), xiC (args[end-1])
             # use this general call signature to account for different numbers of spatial variables
             # mask_func takes spatial variables (args[1:end-4] - not time args[end-3]) and mask_params (args[end][3])
-            xiC_relaxation_func = (args...) -> -1/args[end][2]*(args[end-1] - (-1/args[end][1]^2)*args[end-2]) * mask_func(args[1:end-4]...,args[end][3]) 
+            xiC_relaxation_func = (args...) -> -1/args[end][2]*(args[end-1] - (-1/args[end][1]^2)*args[end-2]) * mask_func(args[1:end-4]...,args[end][3])
             return Forcing(xiC_relaxation_func, parameters = (c, relax_timescale, mask_params), field_dependencies = (vel_key, xiCkey))
         else
             c = getproperty(filter_params, Symbol("c",i))
@@ -657,14 +816,37 @@ function _make_xiC_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
             # args are (spatial variables, t, field deps, parameters). Parameters are args[end] = (c, d, relax_timescale, mask_params), and field deps are velocity (args[end-2]), xiC (args[end-1])
             # use this general call signature to account for different numbers of spatial variables
             # mask_func takes spatial variables (args[1:end-4] - not time args[end-3]) and mask_params (args[end][4])
-            xiC_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2]*(args[end][2]^2 - args[end][1]^2)/(args[end][1]^2 + args[end][2]^2)^2) * mask_func(args[1:end-4]...,args[end][4]) 
+            xiC_relaxation_func = (args...) -> -1/args[end][3]*(args[end-1] - args[end-2]*(args[end][2]^2 - args[end][1]^2)/(args[end][1]^2 + args[end][2]^2)^2) * mask_func(args[1:end-4]...,args[end][4])
             return Forcing(xiC_relaxation_func, parameters = (c, d, relax_timescale, mask_params), field_dependencies = (vel_key, xiCkey))
         end
     end
 end
 
-# Functions for relaxation. 
-function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real, mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+"""
+    _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real,
+                         mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
+
+Create a relaxation term for the sine component (xiS) of a map variable.
+
+# Arguments
+- `i::Int`: The index of the coefficient pair (cᵢ, dᵢ) to use from `filter_params`.
+- `labelled_var_name::String`: The name of the map variable (e.g., "xi_u")
+    including label if used.
+- `vel_name::String`: The name of the velocity variable (e.g., "u").
+- `filter_params::NamedTuple`: A `NamedTuple` containing all filter coefficients.
+- `relax_timescale::Real`: The timescale over which the relaxation occurs.
+- `mask_func::Union{Function, Nothing}`: A function defining the spatial mask for the
+    relaxation. Used only when `discrete = false`; may be `nothing` otherwise.
+- `mask_params::Union{NamedTuple, Nothing}`: Optional parameters for the mask function.
+- `mask_name::Symbol`: Name of the precomputed mask field, used when `discrete = true`.
+- `discrete::Bool=false`: If `true`, build the forcing from the precomputed mask field
+    `mask_name` instead of evaluating `mask_func`.
+
+# Returns
+- A `Forcing` object configured to compute the relaxation term for the xiS field.
+"""
+function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::String, filter_params::NamedTuple, relax_timescale::Real,
+                             mask_func::Union{Function, Nothing}, mask_params::Union{NamedTuple, Nothing}, mask_name::Symbol, discrete::Bool=false)
     c = getproperty(filter_params, Symbol("c",i))
     d = getproperty(filter_params, Symbol("d",i))
     xiSkey = Symbol(labelled_var_name, "_S",i)
@@ -682,9 +864,7 @@ function _make_xiS_relaxation(i::Int, labelled_var_name::String, vel_name::Strin
     end
 end
 
-#TODO
-# - Add docstrings for the above functions
-# - Add tests for relaxation (and test on GPU). Different initialisation, so will need to update reference data. 
+
 """
     create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractConfig)
 
@@ -851,6 +1031,48 @@ function create_forcing(filtered_vars::Tuple{Vararg{Symbol}}, config::AbstractCo
     end
 end
 
+# Per-frequency output names for the exponential window kernel. 
+# for `create_output_fields` and `filtered_output_names` 
+_spectral_component_names(base::String, N_coeffs) =
+    (Tuple(base * "_C$n" for n in 1:N_coeffs), Tuple(base * "_S$n" for n in 1:N_coeffs))
+
+"""
+    filtered_output_names(config::AbstractConfig)
+
+Names of the filtered fields written by `create_output_fields`, split by the parity
+of their weight function in `t - s`: `even_names` combine as forward plus backward,
+`odd_names` as forward minus backward.
+
+For the Butterworth kernels the cosine and sine components are pre-combined into a
+single even field per variable, so `odd_names` is empty. For the exponential window
+kernel each frequency is written separately and the sine components are odd.
+
+Returns
+=======
+- A tuple `(even_names, odd_names)` of `String` tuples.
+"""
+function filtered_output_names(config::AbstractConfig)
+
+    filter_identifier = (config isa AbstractOfflineConfig) && config.advection === nothing ?
+                        "_Eulerian_filtered" : "_Lagrangian_filtered"
+
+    even_names = String[]
+    odd_names  = String[]
+
+    for var_name in config.var_names_to_filter
+        base = var_name * config.label * filter_identifier
+        if uses_exponential_kernel(config.filter_params)
+            C_names, S_names = _spectral_component_names(base, config.filter_params.N_coeffs)
+            append!(even_names, C_names)
+            append!(odd_names,  S_names)
+        else
+            push!(even_names, base)
+        end
+    end
+
+    return Tuple(even_names), Tuple(odd_names)
+end
+
 """
     create_output_fields(model::AbstractModel, config::AbstractConfig)
 
@@ -902,7 +1124,20 @@ function create_output_fields(model::AbstractModel, config::AbstractConfig)
 
     for var_name in var_names_to_filter
         labelled_var_name = var_name * label
-        if N_coeffs == 0.5
+        if uses_exponential_kernel(filter_params)
+            #  write the cosine and sine components at each frequency
+            # separately rather than pre-combining them
+            base = labelled_var_name * filter_identifier
+            C_names, S_names = _spectral_component_names(base, N_coeffs)
+            for n in 1:N_coeffs
+                a = getproperty(filter_params, Symbol("a$n"))
+                b = getproperty(filter_params, Symbol("b$n"))
+                gCn = getproperty(model.tracers, Symbol(labelled_var_name * "_C$n"))
+                gSn = getproperty(model.tracers, Symbol(labelled_var_name * "_S$n"))
+                outputs_dict[C_names[n]] = a * gCn
+                outputs_dict[S_names[n]] = b * gSn
+            end
+        elseif N_coeffs == 0.5
             # Special case, single exponential only has a cosine component
             gC1 = getproperty(model.tracers,Symbol(labelled_var_name * "_C1"))
             g_total = filter_params.a1 * gC1
