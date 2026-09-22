@@ -456,7 +456,7 @@ any other velocity components will be zero by default."
     # Give warning about interpolation if grid is not RectilinearGrid and turn off interpolation for now
     if !underlying_rectilinear_grid && map_to_mean
         @warn "The final interpolation to mean position currently only works for RectilinearGrids - consider setting map_to_mean=false. The ξ maps will still be written if map_to_mean=true."
-        regrid_to_mean = false"
+        regrid_to_mean = false
     end
 
     underlying_latlon_grid = (grid isa LatitudeLongitudeGrid) || ((grid isa ImmersedBoundaryGrid) && (grid.underlying_grid isa LatitudeLongitudeGrid))
