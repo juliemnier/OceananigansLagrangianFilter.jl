@@ -57,7 +57,7 @@ function run_offline_Lagrangian_filter(config)
     @info "Defined outputs"
 
     # Define the filtering simulation 
-    simulation = Simulation(model, Δt = config.Δt, stop_time = config.T) 
+    simulation = Simulation(model, Δt = config.Δt, stop_time = config.T, stop_iteration = ceil(Int, 1.1 * config.T / config.Δt)) 
     @info "Defined simulation"
 
     # Tell the simulation to use the saved data.
