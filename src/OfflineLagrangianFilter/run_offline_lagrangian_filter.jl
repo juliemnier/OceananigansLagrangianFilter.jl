@@ -64,14 +64,22 @@ function run_offline_Lagrangian_filter(config)
     # Use UpdateStateCallsite so that velocities are updated at each substep if using multi-stage time steppers.
     simulation.callbacks[:update_input_data] = Callback(update_input_data!, callsite = UpdateStateCallsite(), parameters = input_data)
 
-    # Add a progress monitor
+    wall_clock = Ref(time_ns())
+    last_iter  = Ref(0)
+
     function progress(sim)
-        @info @sprintf("Simulation time: %s\n", 
-                    prettytime(sim.model.clock.time))             
+        i = sim.model.clock.iteration
+        (i <= 20 || i % 100 == 0) || return nothing
+        nsteps  = max(i - last_iter[], 1)
+        elapsed = (time_ns() - wall_clock[]) * 1e-9
+        wall_clock[] = time_ns()
+        last_iter[]  = i
+        @info @sprintf("iter %d, t = %.17g, last_Δt = %.3e, %.3f s/step",
+                       i, sim.model.clock.time, sim.model.clock.last_Δt, elapsed / nsteps)
         return nothing
     end
 
-    simulation.callbacks[:progress] = Callback(progress,TimeInterval(config.T/10))
+    simulation.callbacks[:progress] = Callback(progress, IterationInterval(1))
 
     #Write outputs
     simulation.output_writers[:vars] = JLD2Writer(model, filtered_outputs, 
