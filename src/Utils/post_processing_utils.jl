@@ -73,8 +73,11 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
         filter_identifier = "_Lagrangian_filtered"
     end
     
-    # List the names of the fields that we will combine
-    filtered_var_names = Tuple([var * label * filter_identifier for var in var_names_to_filter])
+    # List the names of the fields that we will combine, split parity of their weight fn
+    # Butterworth: var*label*filter_identifier
+    # Exponential window it is the per-frequency C components, with the S components as the odd ones.
+    even_names, auto_odd_names = filtered_output_names(config)
+    filtered_var_names = even_names
 
     if map_to_mean
         filtered_var_names = (Tuple(["xi_" * vel * label for vel in velocity_names])..., filtered_var_names...)
@@ -84,7 +87,6 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
     filtered_var_names = Tuple(unique((filtered_var_names..., extra_filtered_var_names...)))
 
     # Fields whose weight function is odd combine as forward minus backward
-    _, auto_odd_names = filtered_output_names(config)
     odd_var_names = Tuple(unique((auto_odd_names..., odd_var_names...)))
 
     filtered_vel_names = ()
