@@ -1454,6 +1454,7 @@ function initialise_filtered_vars_from_model(model::AbstractModel, config::Abstr
 end
 
 function change_sign_of_map_variables!(model::AbstractModel, config::AbstractConfig)
+    uses_exponential_kernel(config.filter_params) && return nothing
     vel_names = config.velocity_names
     label = config.label
     for vel_name in vel_names
