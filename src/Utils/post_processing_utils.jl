@@ -43,16 +43,15 @@ Arguments
   combined.
 - `extra_original_data_names::Tuple{Vararg{String}}=()`: Optional tuple of additional
   original names that have been output and should be copied to the combined output file.
-- `odd_var_names::Tuple{Vararg{String}}=()`:  Optional tuple of filtered variable names
-  whose weight function is odd in `t - s`. These are combined as forward minus backward
-  rather than summed, since the backward pass returns them mirrored. Populated
-  automatically with the per-frequency sine components when `filter_params` selects the
-  exponential window kernel.
+- `extra_odd_var_names::Tuple{Vararg{String}}=()`:  Optional tuple of additional filtered variable names
+  whose weight function is odd in `t - s`. These are combined as forward
+  minus backward rather than summed. The per-frequency sine components of the exponential window kernel are 
+  added automatically, separately.
 
 """
 function sum_forward_backward_contributions!(config::AbstractConfig; extra_filtered_var_names::Tuple{Vararg{String}}=(), 
     extra_filtered_velocity_names::Tuple{Vararg{String}}=(), extra_original_data_names::Tuple{Vararg{String}}=(),
-    odd_var_names::Tuple{Vararg{String}}=())
+    extra_odd_var_names::Tuple{Vararg{String}}=())
 
     # Combine the forward and backward simulations by summing them into a single file
 
@@ -76,8 +75,8 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
     # List the names of the fields that we will combine, split parity of their weight fn
     # Butterworth: var*label*filter_identifier
     # Exponential window it is the per-frequency C components, with the S components as the odd ones.
-    even_names, auto_odd_names = filtered_output_names(config)
-    filtered_var_names = even_names
+    even_var_names, odd_var_names = filtered_output_names(config)
+    filtered_var_names = even_var_names
 
     if map_to_mean
         filtered_var_names = (Tuple(["xi_" * vel * label for vel in velocity_names])..., filtered_var_names...)
@@ -87,7 +86,7 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
     filtered_var_names = Tuple(unique((filtered_var_names..., extra_filtered_var_names...)))
 
     # Fields whose weight function is odd combine as forward minus backward
-    odd_var_names = Tuple(unique((auto_odd_names..., odd_var_names...)))
+    odd_var_names = Tuple(unique((odd_var_names..., extra_odd_var_names...)))
 
     filtered_vel_names = ()
     vel_names_to_filter = ()
@@ -1201,7 +1200,7 @@ function get_weight_function(;t::AbstractArray, tref::Real, filter_params::Named
     τ = tref .- t
 
     if uses_exponential_kernel(filter_params)
-        # Band-pass estimator:sin(d*τ) is odd in τ
+        # Band-pass estimator:sin(d*tau) is odd in tau
         # the S components combine as forward minus backward.
         1 <= index <= N_coeffs || error("index must be between 1 and $N_coeffs, got $index")
 
