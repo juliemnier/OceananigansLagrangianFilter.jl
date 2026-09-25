@@ -390,9 +390,6 @@ through with its amplitude preserved. `S` is its quadrature, so `sqrt(C^2 + S^2)
 wave envelope and `atan(-S, C)` the local phase. 
 At `omega = 0` the normalisation reduces to `alpha/2`, recovering `set_offline_BW2_filter_params(N=1)`.
 
-A band-pass defines no mean position, so `map_to_mean` and `compute_mean_velocities`
-are forced to `false`.
-
 Arguments
 =========
 - `alpha`: Decay rate of the exponential window, setting the bandwidth. Must be positive.
