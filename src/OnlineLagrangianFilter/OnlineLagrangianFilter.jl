@@ -33,6 +33,7 @@ struct OnlineFilterConfig <: AbstractOnlineConfig
     relax_timescale::Union{Real, Nothing}
     mask_params::Union{NamedTuple, Nothing}
     mask_func::Union{Function, Nothing}
+    discrete_relaxation::Bool
 end
 
 """
@@ -133,7 +134,7 @@ function OnlineFilterConfig(; grid::AbstractGrid,
                             relax_timescale::Union{Real, Nothing} = nothing,
                             mask_params::Union{NamedTuple, Nothing} = nothing,
                             mask_func::Union{Function, Nothing}  = nothing,
-                            map_to_mean = nothing # Removed option, gives an error explaining what to use instead
+                            discrete_relaxation::Bool = false
                             )
 
     # Check that velocities aren't in the var_names_to_filter
@@ -272,7 +273,8 @@ function OnlineFilterConfig(; grid::AbstractGrid,
                             boundary_relaxation,
                             relax_timescale,
                             mask_params,
-                            mask_func
+                            mask_func,
+                            discrete_relaxation
                             )
  
 end

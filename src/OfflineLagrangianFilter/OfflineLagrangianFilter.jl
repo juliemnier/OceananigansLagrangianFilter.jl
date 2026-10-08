@@ -111,6 +111,7 @@ struct OfflineFilterConfig <: AbstractOfflineConfig
     relax_timescale::Union{Real, Nothing}
     mask_params::Union{NamedTuple, Nothing}
     mask_func::Union{Function, Nothing}
+    discrete_relaxation::Bool
 
 end
 
@@ -144,7 +145,8 @@ end
                         boundary_relaxation::Bool = false,
                         relax_timescale::Union{Real, Nothing} = nothing,
                         mask_params::Union{NamedTuple, Nothing} = nothing,
-                        mask_func::Union{Function, Nothing} = nothing)
+                        mask_func::Union{Function, Nothing} = nothing,
+                        discrete_relaxation::Bool = false)
 
 Constructs a configuration object for offline Lagrangian filtering of Oceananigans data.
 This function validates the input data file, time specifications, and filter parameters
@@ -182,8 +184,9 @@ Keyword arguments
      at the same time.  Default: "".
   - `boundary_relaxation`: A `Bool` indicating whether to include relaxation to the original data at the boundaries of the domain in the filter simulation. Default: `false`.
   - `relax_timescale`: A `Real` indicating the timescale at which to relax the boundaries to the original fields if boundary_relaxation is `true`. Default `nothing`.
-  - `mask_params`: A `NamedTuple` containing any parameters necessary for `mask_func`. Default `nothing`.
-  - `mask_func`: A `Function` defining the mask for the relaxation. Should be 1 for full relaxation, and 0 for no relaxation. Arguments should be non-flat spatial dimensions and `mask_params`. Default `nothing`.
+  - `mask_params`: A `NamedTuple` containing any parameters necessary for `mask_func`. When `discrete_relaxation = true`, `mask_func` is unused and `mask_params` must instead contain `mask_topo`, an interior-sized array (size `(Nx, Ny, Nz)`) giving the mask directly. Default `nothing`.
+  - `mask_func`: A `Function` defining the mask for relaxation. Should be 1 for full relaxation, and 0 for no relaxation. Arguments should be non-flat spatial dimensions and `mask_params`. Not required when `discrete_relaxation = true`. Default `nothing`.
+  - `discrete_relaxation`: A `Bool` indicating whether to use discrete-form relaxation. Default: `false`.
 # Example:
 
 ```jldoctest offline_config
@@ -252,6 +255,7 @@ function OfflineFilterConfig(; original_data_filename::String,
                             relax_timescale::Union{Real, Nothing} = nothing,
                             mask_params::Union{NamedTuple, Nothing} = nothing,
                             mask_func::Union{Function, Nothing}  = nothing,
+                            discrete_relaxation::Bool = false,
                             map_to_mean = nothing # Removed option, gives an error explaining what to use instead
                             )
 
@@ -470,23 +474,30 @@ any other velocity components will be zero by default."
         if isnothing(relax_timescale)
             error("A relax_timescale must be set if boundary_relaxation = true")
         end
-        if isnothing(mask_params)
-            @warn "mask_params = nothing with boundary_relaxation = true. The mask function probably needs parameters."
-        end
-        if isnothing(mask_func)
-            error("A spatial mask_func must be set if boundary_relaxation = true")
+        if discrete_relaxation
+            # Discrete relaxation uses a precomputed mask Field (added as an auxiliary field),
+            # built from `mask_params.mask_topo`, an interior-sized array of size (Nx, Ny, Nz).
+            if isnothing(mask_params) || !haskey(mask_params, :mask_topo)
+                error("With discrete_relaxation = true, mask_params must contain `mask_topo`, an interior-sized array (size (Nx, Ny, Nz)) giving the relaxation mask (1 for full relaxation, 0 for none).")
+            end
         else
-            # We should check that this function only has one method
-            if !(length(methods(mask_func)) ==1)
-                @warn "mask_func has multiple methods, that could cause issues"
+            if isnothing(mask_params)
+                @warn "mask_params = nothing with boundary_relaxation = true. The mask function probably needs parameters."
             end
-            # We'll also check the number of args is correct
-            num_args = first(methods(mask_func)).nargs - 2 # First argument is self, last is mask_params
-            num_non_flat = count(T -> T !== Flat, topology(grid))
-            if num_args != num_non_flat
-                error("mask_func has the wrong number of arguments")
+            if isnothing(mask_func)
+                error("A spatial mask_func must be set if boundary_relaxation = true")
+            else
+                # We should check that this function only has one method
+                if !(length(methods(mask_func)) ==1)
+                    @warn "mask_func has multiple methods, that could cause issues"
+                end
+                # We'll also check the number of args is correct
+                num_args = first(methods(mask_func)).nargs - 2 # First argument is self, last is mask_params
+                num_non_flat = count(T -> T !== Flat, topology(grid))
+                if num_args != num_non_flat
+                    error("mask_func has the wrong number of arguments")
+                end
             end
-
         end
     end
     
@@ -517,7 +528,8 @@ any other velocity components will be zero by default."
                             boundary_relaxation,
                             relax_timescale,
                             mask_params,
-                            mask_func
+                            mask_func,
+                            discrete_relaxation
                             )
 
 end

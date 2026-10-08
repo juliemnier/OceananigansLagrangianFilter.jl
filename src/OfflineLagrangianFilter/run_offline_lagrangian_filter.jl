@@ -119,6 +119,9 @@ function run_offline_Lagrangian_filter(config)
     # Option to regrid to mean position
     if config.regrid_to_mean
         regrid_to_mean_position!(config)
+    elseif config.map_to_mean
+        @info "ξ maps written to $(config.output_filename); " *
+            "final interpolation to mean position skipped."
     end
 
     # Option to calculate Eulerian filter too

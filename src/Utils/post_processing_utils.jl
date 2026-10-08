@@ -24,7 +24,7 @@ The function performs the following steps:
     the final output.
 2.  **Copies metadata and unfiltered data**: The file structure, metadata,
     and the original, unfiltered data are copied from the forward output file.
-3.  **Sums filtered contributions**: For each filtered variable, the data
+3.  **Combines filtered contributions**: For each filtered variable, the data
     from the backward output file is loaded as a `FieldTimeSeries`. The data
     is then interpolated to match the time steps of the forward simulation,
     and the two datasets are summed and written to the combined output file.
@@ -43,6 +43,7 @@ Arguments
   backward pass, as `create_output_fields` does for the mean velocities).
 - `extra_original_data_names::Tuple{Vararg{String}}=()`: Optional tuple of additional
   original names that have been output and should be copied to the combined output file.
+
 """
 function sum_forward_backward_contributions!(config::AbstractConfig; extra_filtered_var_names::Tuple{Vararg{String}}=(),
     extra_original_data_names::Tuple{Vararg{String}}=())
@@ -64,6 +65,7 @@ function sum_forward_backward_contributions!(config::AbstractConfig; extra_filte
 
     # There might be some extra filtered variables that the user defined that we should combine too
     filtered_var_names = Tuple(unique((filtered_var_names..., extra_filtered_var_names...)))
+
 
     jldopen(output_filename,"w") do combined_file
         jldopen(forward_output_filename,"r") do forward_file
@@ -1264,6 +1266,10 @@ function compute_Eulerian_filter!(config::AbstractConfig)
     compute_mean_velocities = config.compute_mean_velocities
     velocity_names = config.velocity_names
     label = config.label
+
+    if uses_exponential_kernel(filter_params)
+        error("compute_Eulerian_filter! does not yet support the exponential window kernel. Set compute_Eulerian_filter=false.")
+    end
 
     var_names_to_Eulerian_filter = var_names_to_filter
     if compute_mean_velocities
